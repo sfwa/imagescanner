@@ -21,11 +21,6 @@ FOV_X = 1.712
 FOV_Y = FOV_X
 
 
-WS_CONNECTION = None
-WS_TIMEOUT = None
-UPLOAD_RUNNING = False
-
-
 def cam_from_img(img):
     # Convert x, y pixel coordinates to a point on a plane at one metre
     # from the camera
@@ -171,30 +166,31 @@ def scan_image(pgm_path, dest_dir):
 @tornado.gen.coroutine
 def send_images(scan_dir, dest_dir):
     while True:
-        files = [os.path.join(scan_dir, f)
-                 for f in os.listdir(scan_dir) if f.endswith(".jpg")]
-
-        # Wait 0.5 seconds in between scans
-        if not files:
-            yield tornado.gen.Task(
-                tornado.ioloop.IOLoop.instance().call_later, 0.5)
-            continue
-
-        # Ignore all but the latest file -- move the rest to the processed
-        # directory
-        files.sort()
-        last_file = files.pop()
-        for f in files:
-            os.rename(f, os.path.join(dest_dir, os.path.split(f)[1]))
-
-        with open(last_file, 'rb') as img_file:
-            img_data = img_file.read()
-
-        fdir, name = os.path.split(last_file)
-        session = os.path.split(fdir)[1].partition('-')[2]
-
-        http_client = tornado.httpclient.AsyncHTTPClient()
         try:
+            last_file = None
+            files = [os.path.join(scan_dir, f)
+                     for f in os.listdir(scan_dir) if f.endswith(".jpg")]
+
+            # Wait 0.5 seconds in between scans
+            if not files:
+                yield tornado.gen.Task(
+                    tornado.ioloop.IOLoop.instance().call_later, 0.5)
+                continue
+
+            # Ignore all but the latest file -- move the rest to the processed
+            # directory
+            files.sort()
+            last_file = files.pop()
+            for f in files:
+                os.rename(f, os.path.join(dest_dir, os.path.split(f)[1]))
+
+            with open(last_file, 'rb') as img_file:
+                img_data = img_file.read()
+
+            fdir, name = os.path.split(last_file)
+            session = os.path.split(fdir)[1].partition('-')[2]
+
+            http_client = tornado.httpclient.AsyncHTTPClient()
             result = yield http_client.fetch(
                 "http://localhost:31285/vQivxdjcFcUH34mLAEcfm77varwTmAA8/{0}/{1}".format(session, name),
                 method="POST",
@@ -209,78 +205,91 @@ def send_images(scan_dir, dest_dir):
 
 
 @tornado.gen.coroutine
-def poll_ws(ws, *args):
+def scan_images(scan_dir, dest_dir, target_queue):
+    while True:
+        try:
+            files = [f for f in os.listdir(scan_dir)]
+
+            # Ignore odd-numbered files -- move them straight to the processed
+            # directory
+            files.sort()
+            scan_files = []
+            for f in files:
+                # Ignore JPEGs
+                f_name, _, f_type = f.rpartition(".")
+                if f_type not in ("pgm", "txt"):
+                    continue
+                f_idx = int(f_name[len("img"):]
+                            if f_type == "pgm" else f_name[len("telem"):])
+
+                if f_idx % 2 == 1:
+                    os.rename(os.path.join(scan_dir, f),
+                              os.path.join(dest_dir, os.path.split(f)[1]))
+                elif f_type == "pgm":
+                    scan_files.append(os.path.join(scan_dir, f))
+
+            # Wait one second in between scans
+            if not scan_files:
+                log.info("scan_images(): no files to scan")
+                yield tornado.gen.Task(
+                    tornado.ioloop.IOLoop.instance().call_later, 1.0)
+                continue
+
+            # Run up to two concurrent scans
+            if len(scan_files) > 1:
+                log.info("scan_images(): opening two scan processes")
+                img_infos = yield [scan_image(scan_files[0], dest_dir),
+                                  scan_image(scan_files[1], dest_dir)]
+            else:
+                log.info("scan_images(): opening one scan process")
+                img_infos = yield [scan_image(scan_files[0], dest_dir)]
+
+            # Queue the info to be sent, assuming targets were found
+            for img_info in img_infos:
+                if img_info["targets"]:
+                    target_queue.append(img_info)
+        except Exception:
+            log.exception(
+                "scan_images({0}, {1}): scan run encountered an error".format(
+                repr(pgm_path), repr(dest_dir)))
+
+
+@tornado.gen.coroutine
+def send_targets(target_queue):
     log.info("poll_ws()")
     io_loop = tornado.ioloop.IOLoop.instance()
 
     while True:
-        # Closing the socket will trigger a null message, which will abort the
-        # coroutine
-        timeout = io_loop.call_later(10.0, ws.close)
-        msg = yield ws.read_message()
-        if msg is None:
-            log.info("poll_ws(): socket was closed")
-            return
-        log.info("poll_ws(): read message {0}".format(repr(msg)))
-        io_loop.remove_timeout(timeout)
-
-
-
-@tornado.gen.coroutine
-def scan_images(scan_dir, dest_dir):
-    ws = None
-
-    while True:
-        files = [f for f in os.listdir(scan_dir)]
-
-        # Ignore odd-numbered files -- move them straight to the processed
-        # directory
-        files.sort()
-        scan_files = []
-        for f in files:
-            # Ignore JPEGs
-            f_name, _, f_type = f.rpartition(".")
-            if f_type not in ("pgm", "txt"):
-                continue
-            f_idx = int(f_name[len("img"):]
-                        if f_type == "pgm" else f_name[len("telem"):])
-
-            if f_idx % 2 == 1:
-                os.rename(os.path.join(scan_dir, f),
-                          os.path.join(dest_dir, os.path.split(f)[1]))
-            elif f_type == "pgm":
-                scan_files.append(os.path.join(scan_dir, f))
-
-        # Wait one second in between scans
-        if not scan_files:
-            log.info("scan_images(): no files to scan")
-            yield tornado.gen.Task(
-                tornado.ioloop.IOLoop.instance().call_later, 1.0)
-            continue
-
-        # Run up to two concurrent scans
-        if len(scan_files) > 1:
-            log.info("scan_images(): opening two scan processes")
-            img_infos = yield [scan_image(scan_files[0], dest_dir),
-                              scan_image(scan_files[1], dest_dir)]
-        else:
-            log.info("scan_images(): opening one scan process")
-            img_infos = yield [scan_image(scan_files[0], dest_dir)]
-
-        # Ensure the web socket is connected
-        if not ws or not ws.protocol:
-            log.info("scan_images(): re-connecting web socket")
+        try:
+            # Ensure the web socket is connected
+            log.info("scan_images(): connecting web socket")
             ws = yield tornado.websocket.websocket_connect(
                 "ws://localhost:31285/P48WeGkwEFxheWVYEz6rGz4bbiwX4gkT",
                 connect_timeout=30)
-            # Check for responses
-            tornado.ioloop.IOLoop.instance().add_callback(poll_ws, ws)
 
-        # Send the info
-        for img_info in img_infos:
-            msg = json.dumps(img_info)
-            ws.write_message(msg)
-            log.info("scan_images(): wrote message {0}".format(msg))
+            while ws.protocol:
+                while len(target_queue):
+                    # Closing the socket will trigger a null message, which
+                    # will abort the coroutine
+                    timeout = io_loop.call_later(10.0, ws.close)
+
+                    msg = json.dumps(target_queue.popleft())
+                    ws.write_message(msg)
+                    log.info("send_targets(): wrote message {0}".format(msg))
+
+                    msg = yield ws.read_message()
+                    if msg is None:
+                        log.info("send_targets(): socket was closed")
+                        break
+
+                    log.info("send_targets(): read message {0}".format(repr(msg)))
+                    io_loop.remove_timeout(timeout)
+
+                log.info("send_targets(): no targets to send")
+                yield tornado.gen.Task(
+                    tornado.ioloop.IOLoop.instance().call_later, 1.0)
+        except Exception:
+            log.exception("send_targets(): send run encountered an error")
 
 
 if __name__ == "__main__":
@@ -301,9 +310,12 @@ if __name__ == "__main__":
 
     log.getLogger().setLevel(log.DEBUG)
 
+    target_queue = collections.deque()
+
     io_loop = tornado.ioloop.IOLoop.instance()
     io_loop.add_callback(send_images, scan_dir, dest_dir)
-    io_loop.add_callback(scan_images, scan_dir, dest_dir)
+    io_loop.add_callback(scan_images, scan_dir, dest_dir, target_queue)
+    io_loop.add_callback(send_targets, target_queue)
     io_loop.start()
 
 
