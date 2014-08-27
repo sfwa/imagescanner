@@ -2,11 +2,8 @@ import os
 import sys
 import plog
 import math
-import gzip
 import json
 import base64
-import cStringIO
-import subprocess
 import collections
 import tornado.web
 import tornado.gen
@@ -65,15 +62,6 @@ def geo_from_cam(cam, v_lat, v_lon, v_alt, v_q):
         v_lat + n / WGS84_A,
         v_lon + e / (WGS84_A * math.cos(v_lat)),
     )
-
-
-def array_from_pgm(data, byteorder='>'):
-    header, _, image = data.partition("\n")
-    width, height, maxval = [int(item) for item in header.split()[1:]]
-    return numpy.fromstring(
-                image,
-                dtype='u1' if maxval < 256 else byteorder + 'u2'
-            ).reshape((height, width, 3))
 
 
 def info_from_telemetry_file(telemetry_path, img_dir, img_name):
@@ -164,7 +152,7 @@ def scan_image(pgm_path, dest_dir):
 
 
 @tornado.gen.coroutine
-def send_images(scan_dir, dest_dir):
+def send_images(scan_dir, dest_dir, host):
     while True:
         try:
             last_file = None
@@ -192,7 +180,7 @@ def send_images(scan_dir, dest_dir):
 
             http_client = tornado.httpclient.AsyncHTTPClient()
             result = yield http_client.fetch(
-                "http://localhost:31285/vQivxdjcFcUH34mLAEcfm77varwTmAA8/{0}/{1}".format(session, name),
+                "http://{0}:31285/vQivxdjcFcUH34mLAEcfm77varwTmAA8/{1}/{2}".format(host, session, name),
                 method="POST",
                 body=img_data)
 
@@ -255,8 +243,8 @@ def scan_images(scan_dir, dest_dir, target_queue):
 
 
 @tornado.gen.coroutine
-def send_targets(target_queue):
-    log.info("poll_ws()")
+def send_targets(target_queue, host):
+    log.info("poll_ws({0})".format(repr(host)))
     io_loop = tornado.ioloop.IOLoop.instance()
 
     while True:
@@ -264,7 +252,7 @@ def send_targets(target_queue):
             # Ensure the web socket is connected
             log.info("scan_images(): connecting web socket")
             ws = yield tornado.websocket.websocket_connect(
-                "ws://localhost:31285/P48WeGkwEFxheWVYEz6rGz4bbiwX4gkT",
+                "ws://{0}:31285/P48WeGkwEFxheWVYEz6rGz4bbiwX4gkT".format(host),
                 connect_timeout=30)
 
             while ws.protocol:
@@ -293,12 +281,13 @@ def send_targets(target_queue):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        log.error("Usage: scanner.py SCAN_DIR DEST_DIR")
+    if len(sys.argv) < 4:
+        log.error("Usage: scanner.py SCAN_DIR DEST_DIR HOST")
         sys.exit(1)
 
     scan_dir = sys.argv[1]
     dest_dir = sys.argv[2]
+    host = sys.argv[3]
 
     if not os.path.exists(scan_dir):
         log.error("SCAN_DIR does not exist")
@@ -313,9 +302,9 @@ if __name__ == "__main__":
     target_queue = collections.deque()
 
     io_loop = tornado.ioloop.IOLoop.instance()
-    io_loop.add_callback(send_images, scan_dir, dest_dir)
+    io_loop.add_callback(send_images, scan_dir, dest_dir, host)
     io_loop.add_callback(scan_images, scan_dir, dest_dir, target_queue)
-    io_loop.add_callback(send_targets, target_queue)
+    io_loop.add_callback(send_targets, target_queue, host)
     io_loop.start()
 
 
