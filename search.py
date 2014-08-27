@@ -28,7 +28,7 @@ def geo_from_cam(cam, v_lat, v_lon, v_alt, v_q):
     cy = cam[0]
     cz = 1.0
 
-    # Transform body frame to world frame (TODO: may need to take conjugate)
+    # Transform body frame to world frame
     qx, qy, qz, qw = v_q
     qx = -qx
     qy = -qy

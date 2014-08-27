@@ -17,6 +17,9 @@ WGS84_A = 6378137.0
 FOV_X = 1.712
 FOV_Y = FOV_X
 
+WS_URL = "ws://{0}:31285/P48WeGkwEFxheWVYEz6rGz4bbiwX4gkT"
+WS_IMAGE = "http://{0}:31285/vQivxdjcFcUH34mLAEcfm77varwTmAA8/{1}/{2}"
+
 
 def cam_from_img(img):
     # Convert x, y pixel coordinates to a point on a plane at one metre
@@ -34,7 +37,7 @@ def geo_from_cam(cam, v_lat, v_lon, v_alt, v_q):
     cy = cam[0]
     cz = 1.0
 
-    # Transform body frame to world frame (TODO: may need to take conjugate)
+    # Transform body frame to world frame
     qx, qy, qz, qw = v_q
     qx = -qx
     qy = -qy
@@ -180,9 +183,8 @@ def send_images(scan_dir, dest_dir, host):
 
             http_client = tornado.httpclient.AsyncHTTPClient()
             result = yield http_client.fetch(
-                "http://{0}:31285/vQivxdjcFcUH34mLAEcfm77varwTmAA8/{1}/{2}".format(host, session, name),
-                method="POST",
-                body=img_data)
+                WS_IMAGE.format(host, session, name),
+                method="POST", body=img_data)
 
             os.rename(last_file,
                       os.path.join(dest_dir, os.path.split(last_file)[1]))
@@ -252,8 +254,7 @@ def send_targets(target_queue, host):
             # Ensure the web socket is connected
             log.info("scan_images(): connecting web socket")
             ws = yield tornado.websocket.websocket_connect(
-                "ws://{0}:31285/P48WeGkwEFxheWVYEz6rGz4bbiwX4gkT".format(host),
-                connect_timeout=30)
+                WS_URL.format(host), connect_timeout=30)
 
             while ws.protocol:
                 while len(target_queue):
@@ -268,14 +269,20 @@ def send_targets(target_queue, host):
                     msg = yield ws.read_message()
                     if msg is None:
                         log.info("send_targets(): socket was closed")
+                        ws.close()  # For good measure
+                        # Put the message back at the head of the queue
+                        target_queue.appendleft(json.loads(msg))
                         break
 
-                    log.info("send_targets(): read message {0}".format(repr(msg)))
+                    log.info(
+                        "send_targets(): read message {0}".format(repr(msg)))
                     io_loop.remove_timeout(timeout)
 
                 log.info("send_targets(): no targets to send")
                 yield tornado.gen.Task(
                     tornado.ioloop.IOLoop.instance().call_later, 1.0)
+
+            ws.close()  # Just in case
         except Exception:
             log.exception("send_targets(): send run encountered an error")
 
