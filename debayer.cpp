@@ -634,9 +634,11 @@ int main(int argc, char *argv[]) {
             }
 
             std::ofstream jpegf;
-            jpegf.open(argv[2], ios::out | ios::binary);
+            jpegf.open("/tmp/debayer.jpg~", ios::out | ios::binary);
             imgRGB.save_jpeg(jpegf, 20);
             jpegf.close();
+
+            rename("/tmp/debayer.jpg~", argv[2]);
 
             uint16_t *hue = new uint16_t[imgRGB.width() * imgRGB.height()];
             uint16_t *blue = new uint16_t[imgRGB.width() * imgRGB.height()];
