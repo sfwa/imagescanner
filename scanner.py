@@ -149,9 +149,14 @@ def scan_image(pgm_path, dest_dir):
                 })
 
     # Move the image to the 'processed' directory
-    os.rename(pgm_path, os.path.join(dest_dir, pgm_name))
-    os.rename(telemetry_path,
-              os.path.join(dest_dir, os.path.split(telemetry_path)[1]))
+    os.rename(
+        pgm_path,
+        os.path.join(dest_dir, img_info["session"] + "-" + pgm_name))
+    os.rename(
+        telemetry_path,
+        os.path.join(
+            dest_dir,
+            img_info["session"] + "-" + os.path.split(telemetry_path)[1]))
 
     raise tornado.gen.Return(img_info)
 
@@ -161,8 +166,13 @@ def send_images(scan_dir, dest_dir, host):
     while True:
         try:
             last_file = None
-            files = [os.path.join(scan_dir, f)
-                     for f in os.listdir(scan_dir) if f.endswith(".jpg")]
+            files = []
+            for subdir in os.listdir(scan_dir):
+                subdir_path = os.path.join(scan_dir, subdir)
+                if os.path.isdir(subdir_path):
+                    files += list(os.path.join(subdir_path, f)
+                                  for f in os.listdir(subdir_path)
+                                  if f.endswith(".jpg"))
 
             # Wait 0.5 seconds in between scans
             if not files:
@@ -200,7 +210,12 @@ def send_images(scan_dir, dest_dir, host):
 def scan_images(scan_dir, dest_dir, target_queue):
     while True:
         try:
-            files = [f for f in os.listdir(scan_dir)]
+            files = []
+            for subdir in os.listdir(scan_dir):
+                subdir_path = os.path.join(scan_dir, subdir)
+                if os.path.isdir(subdir_path):
+                    files += list(os.path.join(subdir_path, f)
+                                  for f in os.listdir(subdir_path))
 
             # Ignore odd-numbered files -- move them straight to the processed
             # directory
@@ -208,17 +223,20 @@ def scan_images(scan_dir, dest_dir, target_queue):
             scan_files = []
             for f in files:
                 # Ignore JPEGs
-                f_name, _, f_type = f.rpartition(".")
+                f_name, _, f_type = os.path.split(f)[1].rpartition(".")
                 if f_type not in ("pgm", "txt"):
                     continue
                 f_idx = int(f_name[len("img"):]
                             if f_type == "pgm" else f_name[len("telem"):])
 
                 if f_idx % 2 == 1:
-                    os.rename(os.path.join(scan_dir, f),
-                              os.path.join(dest_dir, os.path.split(f)[1]))
+                    subdir = os.path.split(os.path.split(f)[0])[1]
+                    os.rename(f, os.path.join(
+                                    dest_dir,
+                                    subdir.partition('-')[2] + "-" +
+                                        os.path.split(f)[1]))
                 elif f_type == "pgm":
-                    scan_files.append(os.path.join(scan_dir, f))
+                    scan_files.append(f)
 
             # Wait one second in between scans
             if not scan_files:
@@ -243,7 +261,7 @@ def scan_images(scan_dir, dest_dir, target_queue):
         except Exception:
             log.exception(
                 "scan_images({0}, {1}): scan run encountered an error".format(
-                repr(pgm_path), repr(dest_dir)))
+                repr(scan_dir), repr(dest_dir)))
 
 
 @tornado.gen.coroutine
