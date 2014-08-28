@@ -633,12 +633,19 @@ int main(int argc, char *argv[]) {
                     std::endl;
             }
 
+            size_t path_len = strlen(argv[2]);
+            char *temp_path = (char*)malloc(path_len + 1u);
             std::ofstream jpegf;
-            jpegf.open("/tmp/debayer.jpg~", ios::out | ios::binary);
+
+            strncpy(temp_path, argv[2], path_len);
+            temp_path[path_len - 1] = '~';
+
+            jpegf.open(temp_path, ios::out | ios::binary);
             imgRGB.save_jpeg(jpegf, 20);
             jpegf.close();
 
-            rename("/tmp/debayer.jpg~", argv[2]);
+            rename(temp_path, argv[2]);
+            free(temp_path);
 
             uint16_t *hue = new uint16_t[imgRGB.width() * imgRGB.height()];
             uint16_t *blue = new uint16_t[imgRGB.width() * imgRGB.height()];
