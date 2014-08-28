@@ -60,10 +60,12 @@ def geo_from_cam(cam, v_lat, v_lon, v_alt, v_q):
     n = rx * fac
     e = ry * fac
 
+    log.info("geo_from_cam: rx={0} ry={1} rz={2} fac={3} n={4} e={5}".format(rx, ry, rz, fac, n, e))
+
     # Convert north/east offsets to lat/lon
     return (
-        v_lat + n / WGS84_A,
-        v_lon + e / (WGS84_A * math.cos(v_lat)),
+        v_lat + math.degrees(n / WGS84_A),
+        v_lon + math.degrees(e / (WGS84_A * math.cos(math.radians(v_lat)))),
     )
 
 
