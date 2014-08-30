@@ -96,20 +96,27 @@ def geo_from_cam(cam, v_lat, v_lon, v_alt, v_q):
 
 def info_from_telemetry_file(telemetry_path, img_dir, img_name):
     with open(telemetry_path, "r") as telem_file:
-        last_frame = list(p for p in plog.iterlogs_raw(telem_file))[-1]
-        log_data = plog.ParameterLog.deserialize(last_frame)
+        frames = list(p for p in plog.iterlogs_raw(telem_file))
+        if frames:
+            last_frame = frames[-1]
+            log_data = plog.ParameterLog.deserialize(last_frame)
 
-        lat, lon, alt = log_data.find_by(
-            device_id=0,
-            parameter_type=plog.ParameterType.FCS_PARAMETER_ESTIMATED_POSITION_LLA).values
-        lat = math.degrees(lat * math.pi / 2**31)
-        lon = math.degrees(lon * math.pi / 2**31)
-        alt *= 1e-2
+            lat, lon, alt = log_data.find_by(
+                device_id=0,
+                parameter_type=plog.ParameterType.FCS_PARAMETER_ESTIMATED_POSITION_LLA).values
+            lat = math.degrees(lat * math.pi / 2**31)
+            lon = math.degrees(lon * math.pi / 2**31)
+            alt *= 1e-2
 
-        q = log_data.find_by(
-            device_id=0,
-            parameter_type=plog.ParameterType.FCS_PARAMETER_ESTIMATED_ATTITUDE_Q).values
-        q = map(lambda x: float(x) / 32767.0, q)
+            q = log_data.find_by(
+                device_id=0,
+                parameter_type=plog.ParameterType.FCS_PARAMETER_ESTIMATED_ATTITUDE_Q).values
+            q = map(lambda x: float(x) / 32767.0, q)
+        else:
+            lat = 0.0
+            lon = 0.0
+            alt = 0.0
+            q = [0.0, 0.0, 0.0, 1.0]
 
     return {
         "session": os.path.split(img_dir)[1].partition('-')[2],
