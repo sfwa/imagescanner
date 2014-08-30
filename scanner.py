@@ -14,27 +14,52 @@ import tornado.websocket
 
 
 WGS84_A = 6378137.0
-FOV_X = 1.712
-FOV_Y = FOV_X
+FX = 809.63509601
+FY = 809.99738139
+CX, CY = 682.54720546, 490.47417733
+CAMERA_MAT = [
+    [FX,  0, CX],
+    [ 0, FY, CY],
+    [ 0,  0,  1]
+]
+K1, K2, P1, P2, K3 = -0.46088184, 0.25651488, -0.00188008,  0.00167153, -0.07060354
 
 WS_URL = "ws://{0}:31285/P48WeGkwEFxheWVYEz6rGz4bbiwX4gkT"
 WS_IMAGE = "http://{0}:31285/vQivxdjcFcUH34mLAEcfm77varwTmAA8/{1}/{2}"
 
 
+def img_from_lens(lens):
+    x = (lens[0] - CX) / FX
+    y = (lens[1] - CY) / FY
+
+    # Refer http://docs.opencv.org/doc/tutorials/calib3d/camera_calibration/camera_calibration.html
+
+    # Radial undistortion
+    r = math.sqrt(x**2 + y**2)
+    xp = x * (1.0 + K1 * r**2 + K2 * r**4 + K3 * r**6)
+    yp = y * (1.0 + K1 * r**2 + K2 * r**4 + K3 * r**6)
+
+    # Tangential undistortion
+    xpp = xp + 2.0 * P1 * x * y + P2 * (r**2 + 2 * x**2)
+    ypp = yp + P1 * (r**2 + 2 * y**2) + 2.0 * P2 * x * y
+
+    return (xpp, ypp)
+
+
 def cam_from_img(img):
     # Convert x, y pixel coordinates to a point on a plane at one metre
     # from the camera
-    pt_x = (img[0] - 640.0) / 640.0 * FOV_X
-    pt_y = (img[1] - 480.0) / 480.0 * FOV_Y
+    #u = (img[0] - CX) / FX
+    #v = (img[1] - CY) / FY
 
-    return (pt_x, pt_y)
+    return img #(u, v)
 
 
 def geo_from_cam(cam, v_lat, v_lon, v_alt, v_q):
     # Convert x, y image coordinates (in metres at 1.0m viewing distance) to
     # body-frame coordinates
-    cx = -cam[1]
-    cy = cam[0]
+    cx = -cam[1] * 2.825
+    cy = cam[0] * 2.825
     cz = 1.0
 
     # Transform body frame to world frame
@@ -60,7 +85,7 @@ def geo_from_cam(cam, v_lat, v_lon, v_alt, v_q):
     n = rx * fac
     e = ry * fac
 
-    log.info("geo_from_cam: rx={0} ry={1} rz={2} fac={3} n={4} e={5}".format(rx, ry, rz, fac, n, e))
+    log.info("geo_from_cam: cam=({6}, {7}) rx={0} ry={1} rz={2} fac={3} n={4} e={5}".format(rx, ry, rz, fac, n, e, cam[0], cam[1]))
 
     # Convert north/east offsets to lat/lon
     return (
@@ -114,7 +139,8 @@ def scan_image(pgm_path, dest_dir):
     with open(pgm_path, "r") as pgm_file:
         # Debayer the image
         debayer = tornado.process.Subprocess(
-            ["./debayer", "GBRG", os.path.join(pgm_dir, img_info["name"])],
+            [os.path.join(os.path.split(os.path.realpath(__file__)), "debayer"),
+             "GBRG", os.path.join(pgm_dir, img_info["name"])],
             stdin=tornado.process.Subprocess.STREAM,
             stdout=tornado.process.Subprocess.STREAM,
             stderr=tornado.process.Subprocess.STREAM, close_fds=True)
@@ -136,7 +162,8 @@ def scan_image(pgm_path, dest_dir):
                     continue
 
                 blob = eval(blob)
-                geo = geo_from_cam(cam_from_img((blob[1], blob[2])),
+                img = img_from_lens((blob[1], blob[2]))
+                geo = geo_from_cam(cam_from_img(img),
                                    img_info["lat"], img_info["lon"],
                                    img_info["alt"], img_info["q"])
                 if not geo:
