@@ -139,7 +139,7 @@ def scan_image(pgm_path, dest_dir):
     with open(pgm_path, "r") as pgm_file:
         # Debayer the image
         debayer = tornado.process.Subprocess(
-            [os.path.join(os.path.split(os.path.realpath(__file__)), "debayer"),
+            [os.path.join(os.path.split(os.path.realpath(__file__))[0], "debayer"),
              "GBRG", os.path.join(pgm_dir, img_info["name"])],
             stdin=tornado.process.Subprocess.STREAM,
             stdout=tornado.process.Subprocess.STREAM,
