@@ -145,7 +145,7 @@ def info_from_telemetry_file(telemetry_path, telemetry_path_2, img_dir, img_name
         "lon": lon,
         "alt": alt,
         "q": list(q),
-        "telemetry": telem
+        "telemetry": base64.b64encode(telem)
     }
 
 
