@@ -350,7 +350,7 @@ def send_targets(target_queue, host):
                         # Put the message back at the head of the queue
                         target_queue.appendleft(json.loads(msg))
                         break
-                    elif msg[0] == "\x00" and msg[1] == "\x00" and DSP_CONN:
+                    elif msg[0] == "\x00" and msg[-1] == "\x00" and DSP_CONN:
                         # Looks like a telemetry packet, send it to the DSP
                         DSP_CONN.write(msg)
 
