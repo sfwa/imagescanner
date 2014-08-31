@@ -4,6 +4,7 @@ import plog
 import math
 import json
 import base64
+import serial
 import collections
 import tornado.web
 import tornado.gen
@@ -27,6 +28,7 @@ K1, K2, P1, P2, K3 = -0.46088184, 0.25651488, -0.00188008,  0.00167153, -0.07060
 WS_URL = "ws://{0}:31285/P48WeGkwEFxheWVYEz6rGz4bbiwX4gkT"
 WS_IMAGE = "http://{0}:31285/vQivxdjcFcUH34mLAEcfm77varwTmAA8/{1}/{2}"
 
+DSP_CONN = None
 
 def img_from_lens(lens):
     x = (lens[0] - CX) / FX
@@ -94,29 +96,38 @@ def geo_from_cam(cam, v_lat, v_lon, v_alt, v_q):
     )
 
 
-def info_from_telemetry_file(telemetry_path, img_dir, img_name):
-    with open(telemetry_path, "r") as telem_file:
-        frames = list(p for p in plog.iterlogs_raw(telem_file))
-        if frames:
-            last_frame = frames[-1]
-            log_data = plog.ParameterLog.deserialize(last_frame)
+def info_from_telemetry_file(telemetry_path, telemetry_path_2, img_dir, img_name):
+    lat = 0.0
+    lon = 0.0
+    alt = 0.0
+    q = [0.0, 0.0, 0.0, 1.0]
 
-            lat, lon, alt = log_data.find_by(
-                device_id=0,
-                parameter_type=plog.ParameterType.FCS_PARAMETER_ESTIMATED_POSITION_LLA).values
-            lat = math.degrees(lat * math.pi / 2**31)
-            lon = math.degrees(lon * math.pi / 2**31)
-            alt *= 1e-2
+    try:
+        with open(telemetry_path, "r") as telem_file:
+            frames = list(p for p in plog.iterlogs_raw(telem_file))
+            if frames:
+                target_frame = frames[-1]
+                log_data = plog.ParameterLog.deserialize(target_frame)
 
-            q = log_data.find_by(
-                device_id=0,
-                parameter_type=plog.ParameterType.FCS_PARAMETER_ESTIMATED_ATTITUDE_Q).values
-            q = map(lambda x: float(x) / 32767.0, q)
-        else:
-            lat = 0.0
-            lon = 0.0
-            alt = 0.0
-            q = [0.0, 0.0, 0.0, 1.0]
+                lat, lon, alt = log_data.find_by(
+                    device_id=0,
+                    parameter_type=plog.ParameterType.FCS_PARAMETER_ESTIMATED_POSITION_LLA).values
+                lat = math.degrees(lat * math.pi / 2**31)
+                lon = math.degrees(lon * math.pi / 2**31)
+                alt *= 1e-2
+
+        with open(telemetry_path_2, "r") as telem_file:
+            frames = list(p for p in plog.iterlogs_raw(telem_file))
+            if frames:
+                target_frame = frames[1]
+                log_data = plog.ParameterLog.deserialize(target_frame)
+
+                q = log_data.find_by(
+                    device_id=0,
+                    parameter_type=plog.ParameterType.FCS_PARAMETER_ESTIMATED_ATTITUDE_Q).values
+                q = map(lambda x: float(x) / 32767.0, q)
+    except Exception:
+        pass
 
     return {
         "session": os.path.split(img_dir)[1].partition('-')[2],
@@ -139,8 +150,10 @@ def scan_image(pgm_path, dest_dir):
     # Extract the attitude estimate for the current image
     pgm_dir, pgm_name = os.path.split(pgm_path)
     telemetry_path = os.path.join(
-        pgm_dir, "telem" + pgm_name[len("img"):].rpartition(".")[0] + ".txt")
-    img_info = info_from_telemetry_file(telemetry_path, pgm_dir, pgm_name)
+        pgm_dir, "telem{0}.txt".format(int(pgm_name[len("img"):].rpartition(".")[0]) - 2))
+    telemetry_path_2 = os.path.join(
+        pgm_dir, "telem{0}.txt".format(int(pgm_name[len("img"):].rpartition(".")[0])))
+    img_info = info_from_telemetry_file(telemetry_path, telemetry_path_2, pgm_dir, pgm_name)
 
     # Find blob coordinates
     with open(pgm_path, "r") as pgm_file:
@@ -173,7 +186,7 @@ def scan_image(pgm_path, dest_dir):
                 geo = geo_from_cam(cam_from_img(img),
                                    img_info["lat"], img_info["lon"],
                                    img_info["alt"], img_info["q"])
-                if not geo:
+                if not geo or img_info["alt"] < 20.0:
                     continue
 
                 img_info["targets"].append({
@@ -186,11 +199,14 @@ def scan_image(pgm_path, dest_dir):
     os.rename(
         pgm_path,
         os.path.join(dest_dir, img_info["session"] + "-" + pgm_name))
-    os.rename(
-        telemetry_path,
-        os.path.join(
-            dest_dir,
-            img_info["session"] + "-" + os.path.split(telemetry_path)[1]))
+    try:
+        os.rename(
+            telemetry_path,
+            os.path.join(
+                dest_dir,
+                img_info["session"] + "-" + os.path.split(telemetry_path)[1]))
+    except Exception:
+        pass
 
     raise tornado.gen.Return(img_info)
 
@@ -290,8 +306,7 @@ def scan_images(scan_dir, dest_dir, target_queue):
 
             # Queue the info to be sent, assuming targets were found
             for img_info in img_infos:
-                if img_info["targets"]:
-                    target_queue.append(img_info)
+                target_queue.append(img_info)
         except Exception:
             log.exception(
                 "scan_images({0}, {1}): scan run encountered an error".format(
@@ -300,6 +315,8 @@ def scan_images(scan_dir, dest_dir, target_queue):
 
 @tornado.gen.coroutine
 def send_targets(target_queue, host):
+    global DSP_CONN
+
     log.info("poll_ws({0})".format(repr(host)))
     io_loop = tornado.ioloop.IOLoop.instance()
 
@@ -327,6 +344,9 @@ def send_targets(target_queue, host):
                         # Put the message back at the head of the queue
                         target_queue.appendleft(json.loads(msg))
                         break
+                    elif msg[0] == "\x00" and msg[1] == "\x00" and DSP_CONN:
+                        # Looks like a telemetry packet, send it to the DSP
+                        DSP_CONN.write(msg)
 
                     log.info(
                         "send_targets(): read message {0}".format(repr(msg)))
@@ -343,12 +363,14 @@ def send_targets(target_queue, host):
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
-        log.error("Usage: scanner.py SCAN_DIR DEST_DIR HOST")
+        log.error("Usage: scanner.py SCAN_DIR DEST_DIR HOST [DSP_CONN]")
         sys.exit(1)
 
     scan_dir = sys.argv[1]
     dest_dir = sys.argv[2]
     host = sys.argv[3]
+    if len(sys.argv) > 4:
+        DSP_CONN = serial.Serial(port=sys.argv[4], baudrate=115200)
 
     if not os.path.exists(scan_dir):
         log.error("SCAN_DIR does not exist")
