@@ -101,6 +101,7 @@ def info_from_telemetry_file(telemetry_path, telemetry_path_2, img_dir, img_name
     lon = 0.0
     alt = 0.0
     q = [0.0, 0.0, 0.0, 1.0]
+    telem = None
 
     try:
         with open(telemetry_path, "r") as telem_file:
@@ -126,6 +127,10 @@ def info_from_telemetry_file(telemetry_path, telemetry_path_2, img_dir, img_name
                     device_id=0,
                     parameter_type=plog.ParameterType.FCS_PARAMETER_ESTIMATED_ATTITUDE_Q).values
                 q = map(lambda x: float(x) / 32767.0, q)
+
+                # This is the latest data, which is what we'll send back to
+                # the relay
+                telem = frames[-1]
     except Exception:
         pass
 
@@ -139,7 +144,8 @@ def info_from_telemetry_file(telemetry_path, telemetry_path_2, img_dir, img_name
         "lat": lat,
         "lon": lon,
         "alt": alt,
-        "q": list(q)
+        "q": list(q),
+        "telemetry": telem
     }
 
 
