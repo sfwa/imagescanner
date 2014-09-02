@@ -107,6 +107,8 @@ def info_from_telemetry_file(telemetry_path, telemetry_path_2, img_dir, img_name
         with open(telemetry_path, "r") as telem_file:
             frames = list(p for p in plog.iterlogs_raw(telem_file))
             if frames:
+                # Latest data two frames ago (about 900 ms old) -- use for
+                # position
                 target_frame = frames[-1]
                 log_data = plog.ParameterLog.deserialize(target_frame)
 
@@ -120,6 +122,7 @@ def info_from_telemetry_file(telemetry_path, telemetry_path_2, img_dir, img_name
         with open(telemetry_path_2, "r") as telem_file:
             frames = list(p for p in plog.iterlogs_raw(telem_file))
             if frames:
+                # Earliest data in the frame -- use that for the attitude
                 target_frame = frames[1]
                 log_data = plog.ParameterLog.deserialize(target_frame)
 
@@ -301,8 +304,13 @@ def scan_images(scan_dir, dest_dir, target_queue):
                     tornado.ioloop.IOLoop.instance().call_later, 1.0)
                 continue
 
-            # Run up to two concurrent scans
-            if len(scan_files) > 1:
+            # Run up to three concurrent scans
+            if len(scan_files) > 2:
+                log.info("scan_images(): opening three scan processes")
+                img_infos = yield [scan_image(scan_files[0], dest_dir),
+                                  scan_image(scan_files[1], dest_dir),
+                                  scan_image(scan_files[2], dest_dir)]
+            elif len(scan_files) == 2:
                 log.info("scan_images(): opening two scan processes")
                 img_infos = yield [scan_image(scan_files[0], dest_dir),
                                   scan_image(scan_files[1], dest_dir)]
