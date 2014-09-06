@@ -15,15 +15,15 @@ import tornado.websocket
 
 
 WGS84_A = 6378137.0
-FX = 809.63509601
-FY = 809.99738139
-CX, CY = 682.54720546, 490.47417733
+FX = 617.23001311
+FY = 614.73771581
+CX, CY = 640.0, 480.0 #672.17244075, 448.69053823
 CAMERA_MAT = [
     [FX,  0, CX],
     [ 0, FY, CY],
     [ 0,  0,  1]
 ]
-K1, K2, P1, P2, K3 = -0.46088184, 0.25651488, -0.00188008,  0.00167153, -0.07060354
+K1, K2, P1, P2, K3 = -0.23739513, 0.05558019, 0.00167173, -0.00086707, -0.00541909
 
 WS_URL = "ws://{0}:31285/P48WeGkwEFxheWVYEz6rGz4bbiwX4gkT"
 WS_IMAGE = "http://{0}:31285/vQivxdjcFcUH34mLAEcfm77varwTmAA8/{1}/{2}"
@@ -31,21 +31,20 @@ WS_IMAGE = "http://{0}:31285/vQivxdjcFcUH34mLAEcfm77varwTmAA8/{1}/{2}"
 DSP_CONN = None
 
 def img_from_lens(lens):
-    x = (lens[0] - CX) / FX
-    y = (lens[1] - CY) / FY
+    x0 = x = (lens[0] - CX) / FX
+    y0 = y = (lens[1] - CY) / FY
 
-    # Refer http://docs.opencv.org/doc/tutorials/calib3d/camera_calibration/camera_calibration.html
+    # Refer https://code.ros.org/trac/opencv/browser/trunk/opencv/modules/calib3d/src/undistort.cpp?rev=3060#L341
 
-    # Radial undistortion
-    r = math.sqrt(x**2 + y**2)
-    xp = x * (1.0 + K1 * r**2 + K2 * r**4 + K3 * r**6)
-    yp = y * (1.0 + K1 * r**2 + K2 * r**4 + K3 * r**6)
+    for i in range(10):
+        r2 = x**2 + y**2
+        icdist = 1.0 / (1.0 + ((K3 * r2 + K2) * r2 + K1) * r2)
+        deltaX = 2.0 * P1 * x * y + P2 * (r2 + 2 * x * x)
+        deltaY = P1 * (r2 + 2 * y * y) + 2 * P2 * x * y
+        x = (x0 - deltaX) * icdist
+        y = (y0 - deltaY) * icdist
 
-    # Tangential undistortion
-    xpp = xp + 2.0 * P1 * x * y + P2 * (r**2 + 2 * x**2)
-    ypp = yp + P1 * (r**2 + 2 * y**2) + 2.0 * P2 * x * y
-
-    return (xpp, ypp)
+    return (x, y)
 
 
 def cam_from_img(img):
@@ -60,8 +59,8 @@ def cam_from_img(img):
 def geo_from_cam(cam, v_lat, v_lon, v_alt, v_q):
     # Convert x, y image coordinates (in metres at 1.0m viewing distance) to
     # body-frame coordinates
-    cx = -cam[1] * 2.825
-    cy = cam[0] * 2.825
+    cx = -cam[1]
+    cy = cam[0]
     cz = 1.0
 
     # Transform body frame to world frame
@@ -96,7 +95,7 @@ def geo_from_cam(cam, v_lat, v_lon, v_alt, v_q):
     )
 
 
-def info_from_telemetry_file(telemetry_path, telemetry_path_2, img_dir, img_name):
+def info_from_telemetry_file(telemetry_path, img_dir, img_name):
     lat = 0.0
     lon = 0.0
     alt = 0.0
@@ -107,9 +106,8 @@ def info_from_telemetry_file(telemetry_path, telemetry_path_2, img_dir, img_name
         with open(telemetry_path, "r") as telem_file:
             frames = list(p for p in plog.iterlogs_raw(telem_file))
             if frames:
-                # Latest data two frames ago (about 900 ms old) -- use for
-                # position
-                target_frame = frames[-1]
+                # Use the earliest data in the frame
+                target_frame = frames[1]
                 log_data = plog.ParameterLog.deserialize(target_frame)
 
                 lat, lon, alt = log_data.find_by(
@@ -118,13 +116,6 @@ def info_from_telemetry_file(telemetry_path, telemetry_path_2, img_dir, img_name
                 lat = math.degrees(lat * math.pi / 2**31)
                 lon = math.degrees(lon * math.pi / 2**31)
                 alt *= 1e-2
-
-        with open(telemetry_path_2, "r") as telem_file:
-            frames = list(p for p in plog.iterlogs_raw(telem_file))
-            if frames:
-                # Earliest data in the frame -- use that for the attitude
-                target_frame = frames[1]
-                log_data = plog.ParameterLog.deserialize(target_frame)
 
                 q = log_data.find_by(
                     device_id=0,
@@ -159,10 +150,8 @@ def scan_image(pgm_path, dest_dir):
     # Extract the attitude estimate for the current image
     pgm_dir, pgm_name = os.path.split(pgm_path)
     telemetry_path = os.path.join(
-        pgm_dir, "telem{0}.txt".format(int(pgm_name[len("img"):].rpartition(".")[0]) - 2))
-    telemetry_path_2 = os.path.join(
         pgm_dir, "telem{0}.txt".format(int(pgm_name[len("img"):].rpartition(".")[0])))
-    img_info = info_from_telemetry_file(telemetry_path, telemetry_path_2, pgm_dir, pgm_name)
+    img_info = info_from_telemetry_file(telemetry_path, pgm_dir, pgm_name)
 
     # Find blob coordinates
     with open(pgm_path, "r") as pgm_file:
@@ -233,18 +222,18 @@ def send_images(scan_dir, dest_dir, host):
                                   for f in os.listdir(subdir_path)
                                   if f.endswith(".jpg"))
 
-            # Wait 0.5 seconds in between scans
+            # Wait a second in between scans
             if not files:
                 yield tornado.gen.Task(
-                    tornado.ioloop.IOLoop.instance().call_later, 0.5)
+                    tornado.ioloop.IOLoop.instance().call_later, 1.0)
                 continue
 
             # Ignore all but the latest file -- move the rest to the processed
             # directory
             files.sort()
             last_file = files.pop()
-            for f in files:
-                os.rename(f, os.path.join(dest_dir, os.path.split(f)[1]))
+            #for f in files:
+            #    os.rename(f, os.path.join(dest_dir, os.path.split(f)[1]))
 
             with open(last_file, 'rb') as img_file:
                 img_data = img_file.read()
@@ -253,9 +242,14 @@ def send_images(scan_dir, dest_dir, host):
             session = os.path.split(fdir)[1].partition('-')[2]
 
             http_client = tornado.httpclient.AsyncHTTPClient()
-            result = yield http_client.fetch(
-                WS_IMAGE.format(host, session, name),
-                method="POST", body=img_data)
+
+            # Rate-limit the uploads -- no more than 1 image every 2 seconds
+            result = yield [
+                http_client.fetch(WS_IMAGE.format(host, session, name),
+                                  method="POST", body=img_data),
+                tornado.gen.Task(tornado.ioloop.IOLoop.instance().call_later,
+                                 1.0)
+            ]
 
             os.rename(last_file,
                       os.path.join(dest_dir, os.path.split(last_file)[1]))
@@ -276,7 +270,7 @@ def scan_images(scan_dir, dest_dir, target_queue):
                     files += list(os.path.join(subdir_path, f)
                                   for f in os.listdir(subdir_path))
 
-            # Ignore odd-numbered files -- move them straight to the processed
+            # Ignore 2 out of 3 files -- move them straight to the processed
             # directory
             files.sort()
             scan_files = []
@@ -288,7 +282,7 @@ def scan_images(scan_dir, dest_dir, target_queue):
                 f_idx = int(f_name[len("img"):]
                             if f_type == "pgm" else f_name[len("telem"):])
 
-                if f_idx % 2 == 1:
+                if f_idx % 3:
                     subdir = os.path.split(os.path.split(f)[0])[1]
                     os.rename(f, os.path.join(
                                     dest_dir,
@@ -335,6 +329,10 @@ def send_targets(target_queue, host):
     io_loop = tornado.ioloop.IOLoop.instance()
 
     while True:
+        # Rate-limit re-connects
+        yield tornado.gen.Task(
+                tornado.ioloop.IOLoop.instance().call_later, 2.0)
+
         try:
             # Ensure the web socket is connected
             log.info("scan_images(): connecting web socket")
