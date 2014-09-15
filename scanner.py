@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import plog
 import math
@@ -13,86 +14,16 @@ import tornado.ioloop
 import tornado.process
 import tornado.websocket
 
-
-WGS84_A = 6378137.0
-FX = 617.23001311
-FY = 614.73771581
-CX, CY = 640.0, 480.0 #672.17244075, 448.69053823
-CAMERA_MAT = [
-    [FX,  0, CX],
-    [ 0, FY, CY],
-    [ 0,  0,  1]
-]
-K1, K2, P1, P2, K3 = -0.23739513, 0.05558019, 0.00167173, -0.00086707, -0.00541909
-
 WS_URL = "ws://{0}:31285/P48WeGkwEFxheWVYEz6rGz4bbiwX4gkT"
 WS_IMAGE = "http://{0}:31285/vQivxdjcFcUH34mLAEcfm77varwTmAA8/{1}/{2}"
 
 DSP_CONN = None
 
-def img_from_lens(lens):
-    x0 = x = (lens[0] - CX) / FX
-    y0 = y = (lens[1] - CY) / FY
-
-    # Refer https://code.ros.org/trac/opencv/browser/trunk/opencv/modules/calib3d/src/undistort.cpp?rev=3060#L341
-
-    for i in range(10):
-        r2 = x**2 + y**2
-        icdist = 1.0 / (1.0 + ((K3 * r2 + K2) * r2 + K1) * r2)
-        deltaX = 2.0 * P1 * x * y + P2 * (r2 + 2 * x * x)
-        deltaY = P1 * (r2 + 2 * y * y) + 2 * P2 * x * y
-        x = (x0 - deltaX) * icdist
-        y = (y0 - deltaY) * icdist
-
-    return (x, y)
+NUM_PATTERN = re.compile('(\d+)\.')
 
 
-def cam_from_img(img):
-    # Convert x, y pixel coordinates to a point on a plane at one metre
-    # from the camera
-    #u = (img[0] - CX) / FX
-    #v = (img[1] - CY) / FY
-
-    return img #(u, v)
-
-
-def geo_from_cam(cam, v_lat, v_lon, v_alt, v_q):
-    # Convert x, y image coordinates (in metres at 1.0m viewing distance) to
-    # body-frame coordinates
-    cx = -cam[1]
-    cy = cam[0]
-    cz = 1.0
-
-    # Transform body frame to world frame
-    qx, qy, qz, qw = v_q
-    qx = -qx
-    qy = -qy
-    qz = -qz
-
-    tx = 2.0 * (qy * cz - qz * cy)
-    ty = 2.0 * (qz * cx - qx * cz)
-    tz = 2.0 * (qx * cy - qy * cx)
-
-    rx = cx + qw * tx + qy * tz - qz * ty
-    ry = cy + qw * ty + qz * tx - qx * tz
-    rz = cz + qw * tz - qy * tx + qx * ty
-
-    # Project the ray down to where it intersects with the ground plane.
-    # If the z-component is negative or zero, the point is in the sky.
-    if rz < 0.001:
-        return None
-
-    fac = v_alt / rz
-    n = rx * fac
-    e = ry * fac
-
-    log.info("geo_from_cam: cam=({6}, {7}) rx={0} ry={1} rz={2} fac={3} n={4} e={5}".format(rx, ry, rz, fac, n, e, cam[0], cam[1]))
-
-    # Convert north/east offsets to lat/lon
-    return (
-        v_lat + math.degrees(n / WGS84_A),
-        v_lon + math.degrees(e / (WGS84_A * math.cos(math.radians(v_lat)))),
-    )
+def sort_numbered_files(files):
+    files.sort(key=lambda x: int(NUM_PATTERN.search(x).group(1)))
 
 
 def info_from_telemetry_file(telemetry_path, img_dir, img_name):
@@ -172,26 +103,15 @@ def scan_image(pgm_path, dest_dir):
         thumb_out, blob_out = yield [debayer.stdout.read_until_close(),
                                      debayer.stderr.read_until_close()];
 
-        if thumb_out:
+        if thumb_out and img_info["alt"] > 20.0:
             img_info["thumb"] = base64.b64encode(thumb_out)
 
             for blob in blob_out.split("\n"):
                 if not blob:
                     continue
 
-                blob = eval(blob)
-                img = img_from_lens((blob[1], blob[2]))
-                geo = geo_from_cam(cam_from_img(img),
-                                   img_info["lat"], img_info["lon"],
-                                   img_info["alt"], img_info["q"])
-                if not geo or img_info["alt"] < 20.0:
-                    continue
-
-                img_info["targets"].append({
-                    "lat": geo[0], "lon": geo[1],
-                    "score": blob[3],
-                    "x": blob[1], "y": blob[2]
-                })
+                b = eval(blob)
+                img_info["targets"].append({"x": b[1], "y": b[2]})
 
     # Move the image to the 'processed' directory
     os.rename(
@@ -213,7 +133,7 @@ def scan_image(pgm_path, dest_dir):
 def send_images(scan_dir, dest_dir, host):
     while True:
         try:
-            last_file = None
+            next_file = None
             files = []
             for subdir in os.listdir(scan_dir):
                 subdir_path = os.path.join(scan_dir, subdir)
@@ -230,33 +150,33 @@ def send_images(scan_dir, dest_dir, host):
 
             # Ignore all but the latest file -- move the rest to the processed
             # directory
-            files.sort()
-            last_file = files.pop()
-            #for f in files:
-            #    os.rename(f, os.path.join(dest_dir, os.path.split(f)[1]))
+            sort_numbered_files(files)
+            next_file = files[0]
+            fdir, name = os.path.split(next_file)
 
-            with open(last_file, 'rb') as img_file:
-                img_data = img_file.read()
+            # Only every 3rd image is processed, so this means every 6th is
+            # uploaded
+            if int(name.partition("_")[0][len("img"):]) % 2 == 0:
+                with open(next_file, 'rb') as img_file:
+                    img_data = img_file.read()
 
-            fdir, name = os.path.split(last_file)
-            session = os.path.split(fdir)[1].partition('-')[2]
+                session = os.path.split(fdir)[1].partition('-')[2]
+                http_client = tornado.httpclient.AsyncHTTPClient()
 
-            http_client = tornado.httpclient.AsyncHTTPClient()
+                # Rate-limit the uploads -- no more than 1 image every 2 seconds
+                result = yield [
+                    http_client.fetch(WS_IMAGE.format(host, session, name),
+                                      method="POST", body=img_data),
+                    tornado.gen.Task(tornado.ioloop.IOLoop.instance().call_later,
+                                     2.0)
+                ]
 
-            # Rate-limit the uploads -- no more than 1 image every 2 seconds
-            result = yield [
-                http_client.fetch(WS_IMAGE.format(host, session, name),
-                                  method="POST", body=img_data),
-                tornado.gen.Task(tornado.ioloop.IOLoop.instance().call_later,
-                                 1.0)
-            ]
-
-            os.rename(last_file,
-                      os.path.join(dest_dir, os.path.split(last_file)[1]))
+            os.rename(next_file,
+                      os.path.join(dest_dir, os.path.split(next_file)[1]))
         except Exception:
             log.exception(
                 "send_images({0}, {1}): couldn't upload image {2}".format(
-                repr(scan_dir), repr(dest_dir), repr(last_file)))
+                repr(scan_dir), repr(dest_dir), repr(next_file)))
 
 
 @tornado.gen.coroutine
@@ -272,7 +192,7 @@ def scan_images(scan_dir, dest_dir, target_queue):
 
             # Ignore 2 out of 3 files -- move them straight to the processed
             # directory
-            files.sort()
+            sort_numbered_files(files)
             scan_files = []
             for f in files:
                 # Ignore JPEGs
@@ -328,6 +248,8 @@ def send_targets(target_queue, host):
     log.info("poll_ws({0})".format(repr(host)))
     io_loop = tornado.ioloop.IOLoop.instance()
 
+    last_dsp_msg = None
+
     while True:
         # Rate-limit re-connects
         yield tornado.gen.Task(
@@ -340,33 +262,40 @@ def send_targets(target_queue, host):
                 WS_URL.format(host), connect_timeout=30)
 
             while ws.protocol:
-                while len(target_queue):
-                    # Closing the socket will trigger a null message, which
-                    # will abort the coroutine
-                    timeout = io_loop.call_later(10.0, ws.close)
+                # Closing the socket will trigger a null message, which
+                # will abort the coroutine
+                timeout = io_loop.call_later(10.0, ws.close)
 
+                if len(target_queue):
                     msg = json.dumps(target_queue.popleft())
-                    ws.write_message(msg)
-                    log.info("send_targets(): wrote message {0}".format(msg))
+                else:
+                    msg = "{}"
+                ws.write_message(msg)
+                log.info("send_targets(): wrote message {0}".format(msg))
 
-                    msg = yield ws.read_message()
-                    if msg is None:
-                        log.info("send_targets(): socket was closed")
-                        ws.close()  # For good measure
-                        # Put the message back at the head of the queue
-                        target_queue.appendleft(json.loads(msg))
-                        break
-                    elif msg[0] == "\x00" and msg[-1] == "\x00" and DSP_CONN:
-                        # Looks like a telemetry packet, send it to the DSP
-                        DSP_CONN.write(msg)
-
-                    log.info(
-                        "send_targets(): read message {0}".format(repr(msg)))
-                    io_loop.remove_timeout(timeout)
-
-                log.info("send_targets(): no targets to send")
+                # Minimum one-second delay per loop iteration -- stop the
+                # connection from being hit too heavily
                 yield tornado.gen.Task(
                     tornado.ioloop.IOLoop.instance().call_later, 1.0)
+
+                msg = yield ws.read_message()
+                if msg is None:
+                    log.info("send_targets(): socket was closed")
+                    ws.close()  # For good measure
+                    # Put the message back at the head of the queue
+                    if msg != "{}":
+                        target_queue.appendleft(json.loads(msg))
+                    break
+                elif msg[0] == "\x00" and msg[-1] == "\x00" and DSP_CONN and \
+                        msg != last_dsp_msg:
+                    log.debug("send_targets(): forwarded message to DSP")
+                    # Looks like a telemetry packet, send it to the DSP
+                    DSP_CONN.write(msg)
+                    last_dsp_msg = msg
+
+                log.info(
+                    "send_targets(): read message {0}".format(repr(msg)))
+                io_loop.remove_timeout(timeout)
 
             ws.close()  # Just in case
         except Exception:
