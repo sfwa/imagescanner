@@ -6,12 +6,14 @@ import math
 import json
 import base64
 import serial
+import socket
 import collections
 import tornado.web
 import tornado.gen
 import logging as log
 import tornado.ioloop
 import tornado.process
+import tornado.iostream
 import tornado.websocket
 
 WS_URL = "ws://{0}:31285/P48WeGkwEFxheWVYEz6rGz4bbiwX4gkT"
@@ -129,6 +131,17 @@ def scan_image(pgm_path, dest_dir):
     raise tornado.gen.Return(img_info)
 
 
+class PatchedTCPClient(tornado.tcpclient.TCPClient):
+    def _create_stream(self, max_buffer_size, af, addr):
+        stream = tornado.iostream.IOStream(socket.socket(af),
+                                           io_loop=self.io_loop,
+                                           max_buffer_size=max_buffer_size)
+        stream.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8192)
+        log.debug("PatchedTCPClient._create_stream(...): set socket send "
+                  "buffer size to 8 kB")
+        return stream.connect(addr)
+
+
 @tornado.gen.coroutine
 def send_images(scan_dir, dest_dir, host):
     while True:
@@ -162,6 +175,14 @@ def send_images(scan_dir, dest_dir, host):
 
                 session = os.path.split(fdir)[1].partition('-')[2]
                 http_client = tornado.httpclient.AsyncHTTPClient()
+
+
+                # Install a monkeypatch to set the HTTP client's socket send
+                # buffer size
+                if not isinstance(http_client.tcp_client, PatchedTCPClient):
+                    http_client.tcp_client = PatchedTCPClient(
+                        resolver=http_client.resolver,
+                        io_loop=http_client.tcp_client.io_loop)
 
                 # Rate-limit the uploads -- no more than 1 image every 2 seconds
                 result = yield [
@@ -274,6 +295,9 @@ def send_targets(target_queue, host):
                     target_queue.popleft()
 
             while ws.protocol:
+                # Set nodelay on the connection's TCP socket
+                ws.stream.set_nodelay(True)
+
                 # Closing the socket will trigger a null message, which
                 # will abort the coroutine
                 timeout = io_loop.call_later(10.0, ws.close)
@@ -285,28 +309,29 @@ def send_targets(target_queue, host):
                 ws.write_message(msg)
                 log.info("send_targets(): wrote message {0}".format(msg))
 
-                # Minimum one-second delay per loop iteration -- stop the
+                # Minimum 0.5-second delay per loop iteration -- stop the
                 # connection from being hit too heavily
-                yield tornado.gen.Task(
-                    tornado.ioloop.IOLoop.instance().call_later, 0.5)
-
-                msg = yield ws.read_message()
-                if msg is None:
+                resp, _ = yield [
+                    ws.read_message(),
+                    tornado.gen.Task(
+                        tornado.ioloop.IOLoop.instance().call_later, 0.5)
+                ]
+                if resp is None:
                     log.info("send_targets(): socket was closed")
                     ws.close()  # For good measure
                     # Put the message back at the head of the queue
                     if msg != "{}":
                         target_queue.appendleft(json.loads(msg))
                     break
-                elif msg[0] == "\x00" and msg[-1] == "\x00" and DSP_CONN and \
-                        msg != last_dsp_msg:
+                elif resp[0] == "\x00" and resp[-1] == "\x00" and \
+                        DSP_CONN and resp != last_dsp_msg:
                     log.debug("send_targets(): forwarded message to DSP")
                     # Looks like a telemetry packet, send it to the DSP
-                    DSP_CONN.write(msg)
-                    last_dsp_msg = msg
+                    DSP_CONN.write(resp)
+                    last_dsp_msg = resp
 
                 log.info(
-                    "send_targets(): read message {0}".format(repr(msg)))
+                    "send_targets(): read message {0}".format(repr(resp)))
                 io_loop.remove_timeout(timeout)
 
             ws.close()  # Just in case
