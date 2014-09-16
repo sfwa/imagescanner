@@ -171,6 +171,10 @@ def send_images(scan_dir, dest_dir, host):
                                      2.0)
                 ]
 
+                log.info(
+                    "send_images({0}, {1}): uploaded image {2}".format(
+                    repr(scan_dir), repr(dest_dir), repr(next_file)))
+
             os.rename(next_file,
                       os.path.join(dest_dir, os.path.split(next_file)[1]))
         except Exception:
@@ -261,6 +265,14 @@ def send_targets(target_queue, host):
             ws = yield tornado.websocket.websocket_connect(
                 WS_URL.format(host), connect_timeout=30)
 
+            # After a disconnect, skip any telemetry-only messages so we don't
+            # fall behind in target processing
+            while len(target_queue):
+                if len(target_queue[0]["targets"]):
+                    break
+                else:
+                    target_queue.popleft()
+
             while ws.protocol:
                 # Closing the socket will trigger a null message, which
                 # will abort the coroutine
@@ -276,7 +288,7 @@ def send_targets(target_queue, host):
                 # Minimum one-second delay per loop iteration -- stop the
                 # connection from being hit too heavily
                 yield tornado.gen.Task(
-                    tornado.ioloop.IOLoop.instance().call_later, 1.0)
+                    tornado.ioloop.IOLoop.instance().call_later, 0.5)
 
                 msg = yield ws.read_message()
                 if msg is None:

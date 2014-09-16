@@ -350,8 +350,10 @@ public:
     bool save_jpeg(std::ostream& out, int quality) const {
         unsigned char *buffer, *outbuf = NULL;
         unsigned char **scanline_ptrs;
-        unsigned int i;
+        unsigned int i, j, minv[3], maxv[3], c;
         size_t outsize = 0;
+
+        c = channels_per_pixel();
 
         buffer = new unsigned char[m_stride * m_height];
         scanline_ptrs = new unsigned char*[m_height];
@@ -360,13 +362,29 @@ public:
             scanline_ptrs[i] = &buffer[m_stride * i];
         }
 
+        /*
+        Determine minimum and maximum values for each channel so we can
+        normalize them.
+        */
+        for (i = 0; i < c; i++) {
+            minv[i] = 1000000;
+            maxv[i] = 0;
+            for (j = i; j < m_stride * m_height; j += c) {
+                if (m_buffer[j] < minv[i]) {
+                    minv[i] = m_buffer[j];
+                } else if (m_buffer[j] > maxv[i]) {
+                    maxv[i] = m_buffer[j];
+                }
+            }
+        }
+
         if (m_format == GREY16 || m_format == RGB48) {
             for (i = 0; i < m_stride * m_height; i++) {
-                buffer[i] = m_buffer[i] >> 8;
+                buffer[i] = ((m_buffer[i] - minv[i % c]) * 65535u / maxv[i % c]) >> 8u;
             }
         } else {
             for (i = 0; i < m_stride * m_height; i++) {
-                buffer[i] = m_buffer[i];
+                buffer[i] = (m_buffer[i] - minv[i % c]) * 255u / maxv[i % c];
             }
         }
 
